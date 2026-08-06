@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>SAML Test SP</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:760px;margin:3rem auto;padding:0 1rem;line-height:1.6}
+ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;font-size:.9em}
+ .warn{background:#fff4e5;border-left:4px solid #e6a23c;padding:.8rem 1rem;margin:1rem 0}
+ .ok{background:#eef7ee;border-left:4px solid #4caf50;padding:.8rem 1rem;margin:1rem 0}
+ a.btn{display:inline-block;background:#1f6feb;color:#fff;padding:.6rem 1.2rem;border-radius:5px;text-decoration:none}
+ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:.4rem .6rem;text-align:left;font-size:.9em}
+</style></head>
+<body>
+<h1>SAML Test SP</h1>
+<p>A real Service Provider for the PingFederate lab. PingFederate is the IdP; this app is the SP.</p>
+
+{% if not idp_configured %}
+<div class="warn">
+  <strong>IdP not configured yet.</strong><br>
+  Finish creating the SP Connection in PingFederate, then set
+  <code>IDP_ENTITY_ID</code>, <code>IDP_SSO_URL</code> and <code>IDP_X509_CERT</code>
+  in <code>.env</code> and run <code>docker compose up -d saml-app</code>.
+</div>
+{% else %}
+<div class="ok">IdP configured. Ready to test a login.</div>
+{% endif %}
+
+<h2>This SP's identity</h2>
+<table>
+<tr><th>Entity ID</th><td><code>{{ sp_entity_id }}</code></td></tr>
+<tr><th>ACS URL</th><td><code>{{ acs_url }}</code></td></tr>
+<tr><th>Metadata</th><td><a href="/metadata">/metadata</a> — import this into PingFederate</td></tr>
+</table>
+
+<h2>Try it</h2>
+{% if user %}
+  <p>Signed in as <strong>{{ nameid }}</strong>.</p>
+  <p><a class="btn" href="/whoami">See the assertion</a> &nbsp; <a href="/logout">Log out</a></p>
+{% else %}
+  <p><a class="btn" href="/login">Log in via PingFederate</a></p>
+{% endif %}
+</body></html>

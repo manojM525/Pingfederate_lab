@@ -1,0 +1,145 @@
+# PingFederate learning lab — four containers on one EC2 host.
+#
+# Everything is HTTP. This is deliberate: it keeps SAML POST bodies and OIDC
+# redirects readable in browser devtools, which is most of the point.
+# Do not copy this file toward anything real.
+#
+# Every URL is built from HOST_IP (see .env). That value must be the Elastic IP,
+# not a hostname and not localhost — the browser has to reach these services and
+# the URLs get baked into federation config on both sides.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PingFederate — the broker. The thing being learned.
+  # Nothing here is pre-configured. You build every object by hand.
+  # ---------------------------------------------------------------------------
+  pingfederate:
+    image: pingidentity/pingfederate:${PF_VERSION}
+    container_name: pf
+    restart: unless-stopped
+    ports:
+      - "9999:9999"   # admin console  — configuration only
+      - "9031:9031"   # runtime engine — all federation traffic
+    environment:
+      PING_IDENTITY_ACCEPT_EULA: "YES"
+      PING_IDENTITY_DEVOPS_USER: ${PING_IDENTITY_DEVOPS_USER}
+      PING_IDENTITY_DEVOPS_KEY: ${PING_IDENTITY_DEVOPS_KEY}
+      SERVER_PROFILE_URL: ""
+      # Admin console credentials. Changing PF_ADMIN_PASSWORD after first boot
+      # has no effect — the account already exists in the mounted volume.
+      PING_IDENTITY_PASSWORD: ${PF_ADMIN_PASSWORD}
+    volumes:
+      # Without this, every `docker compose down` destroys every connection,
+      # adapter and contract you built. The H2 config store lives here.
+      - pf-data:/opt/out
+    healthcheck:
+      test: ["CMD", "curl", "-fsSk", "https://localhost:9031/pf/heartbeat.ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+
+  # ---------------------------------------------------------------------------
+  # Keycloak — upstream IdP. Scaffolding, not the subject.
+  # Pre-configured via realm import so you can focus on the PF side.
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
+    container_name: keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "8080:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Keycloak builds absolute URLs (issuer, metadata endpoints) from this.
+      # Wrong value here = metadata that points somewhere unreachable, exactly
+      # the `localhost` problem from PingFederate Day 1.
+      KC_HOSTNAME: http://${HOST_IP}:8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-byoi-test.json:/opt/keycloak/data/import/realm-byoi-test.json:ro
+      - kc-data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/byoi-test HTTP/1.1\\nHost: localhost\\nConnection: close\\n\\n' >&3 && cat <&3 | head -1 | grep -q 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # First boot does DB init + realm import (3 users, 2 groups, 2 clients
+      # with protocol mappers) on top of normal JVM startup — routinely takes
+      # longer than a bare `start-dev`. 90s avoids a false "unhealthy" on a
+      # cold pull; it will still report "starting" until then, which is
+      # expected, not a failure.
+      start_period: 90s
+
+  # ---------------------------------------------------------------------------
+  # Flask SAML SP — downstream SAML app. Your Phase 2 target.
+  # Grafana OSS cannot do SAML (Enterprise only), which is why this exists.
+  # ---------------------------------------------------------------------------
+  saml-app:
+    build: ./saml-app
+    container_name: saml-app
+    restart: unless-stopped
+    ports:
+      - "5000:8080"
+    environment:
+      SP_BASE_URL: http://${HOST_IP}:5000
+      SP_ENTITY_ID: http://${HOST_IP}:5000/metadata
+      # Populated in Phase 2 after you create the SP Connection in PingFederate.
+      # Until then the app runs and serves /metadata but cannot verify assertions.
+      IDP_ENTITY_ID: ${IDP_ENTITY_ID:-}
+      IDP_SSO_URL: ${IDP_SSO_URL:-}
+      IDP_X509_CERT: ${IDP_X509_CERT:-}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Grafana — downstream OIDC app. Your Phase 5/6 target.
+  # Same role it plays in the real BYOI project.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SERVER_ROOT_URL: http://${HOST_IP}:3000
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+
+      # --- Generic OAuth / OIDC. Inert until Phase 5. ---
+      # Set OIDC_ENABLED=true in .env once the PF OAuth client exists.
+      GF_AUTH_GENERIC_OAUTH_ENABLED: ${OIDC_ENABLED:-false}
+      GF_AUTH_GENERIC_OAUTH_NAME: PingFederate
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email"
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://${HOST_IP}:9031/as/authorization.oauth2
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: https://${HOST_IP}:9031/as/token.oauth2
+      GF_AUTH_GENERIC_OAUTH_API_URL: https://${HOST_IP}:9031/idp/userinfo.openid
+      # PingFederate's runtime cert is self-signed in this lab.
+      GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE: "true"
+      # Maps the `groups` claim to Grafana roles — the group-to-RBAC bridge,
+      # the same shape as Identity Center's group-to-permission-set mapping.
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(groups[*], 'platform-admins') && 'Admin' || contains(groups[*], 'viewers') && 'Viewer' || 'Viewer'"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\"ok\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pf-data:
+  kc-data:
+  grafana-data:
