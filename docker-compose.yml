@@ -29,6 +29,8 @@ services:
       # Admin console credentials. Changing PF_ADMIN_PASSWORD after first boot
       # has no effect — the account already exists in the mounted volume.
       PING_IDENTITY_PASSWORD: ${PF_ADMIN_PASSWORD}
+      PF_ADMIN_PUBLIC_BASEURL: https://${HOST_IP}:9999
+      PF_ENGINE_PUBLIC_HOSTNAME: ${HOST_IP}
     volumes:
       # Without this, every `docker compose down` destroys every connection,
       # adapter and contract you built. The H2 config store lives here.
